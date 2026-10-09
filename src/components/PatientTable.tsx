@@ -950,55 +950,6 @@ export const PatientTable: React.FC<PatientTableProps> = ({
             Semua ({patients.length})
           </button>
         </div>
-
-        {/* Action Buttons */}
-        <div className="flex items-center gap-2 mb-1 sm:mb-0">
-          {/* Tombol Tarik dari Sheet */}
-          {onPullFromSheet && (
-            <button
-              type="button"
-              onClick={() => onPullFromSheet()}
-              disabled={isSyncing}
-              className="h-7.5 px-2.5 sm:px-3 rounded-lg font-semibold text-xs text-white bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 transition flex items-center gap-1.5 shadow-2xs cursor-pointer shrink-0"
-              title="Tarik data pasien, alokasi EPO, dan jadwal terbaru dari Google Sheet"
-            >
-              {isSyncing ? (
-                <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
-              ) : (
-                <ArrowDownToLine className="w-3.5 h-3.5 shrink-0" />
-              )}
-              <span>{isSyncing ? 'Menarik...' : 'Tarik dari Sheet'}</span>
-            </button>
-          )}
-
-          {/* Tombol Kirim ke Sheet */}
-          {onPushToSheet && (
-            <button
-              type="button"
-              onClick={() => onPushToSheet(activeSheetTab === 'ALL' ? undefined : activeSheetTab)}
-              disabled={isSyncing}
-              className="h-7.5 px-2.5 sm:px-3 rounded-lg font-semibold text-xs text-white bg-rose-700 hover:bg-rose-800 active:bg-rose-900 disabled:opacity-50 transition flex items-center gap-1.5 shadow-2xs cursor-pointer shrink-0"
-              title={
-                activeSheetTab === 'ALL'
-                  ? 'Kirim data seluruh pasien ke 3 sheet jadwal (Senin-Kamis, Selasa-Jumat, Rabu-Sabtu) di Google Sheet'
-                  : `Kirim data yang diinputkan khusus sheet ${activeSheetTab} ke Google Sheet`
-              }
-            >
-              {isSyncing ? (
-                <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" />
-              ) : (
-                <ArrowUpFromLine className="w-3.5 h-3.5 shrink-0" />
-              )}
-              <span>
-                {isSyncing
-                  ? 'Mengirim...'
-                  : activeSheetTab === 'ALL'
-                  ? 'Kirim ke Semua Sheet'
-                  : `Kirim ke Sheet (${activeSheetTab.replace(' - ', '-')})`}
-              </span>
-            </button>
-          )}
-        </div>
       </div>
 
       {/* Toolbar Filter & Tombol Pilihan Shift */}

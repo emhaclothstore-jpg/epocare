@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 import { PatientRecord, HDDaySchedule } from '../types/dialysis';
-import { buildScheduleMatrixTable, buildYearlySummaryTable, buildNextMonthCalendarMatrix, getMonthDaysInfo, SCHEDULE_SHEETS } from './googleSheets';
+import { buildScheduleMatrixTable, buildYearlySummaryTable, buildNextMonthCalendarMatrix, buildDeceasedPatientsTable, getMonthDaysInfo, SCHEDULE_SHEETS } from './googleSheets';
 import { getEffectivePatientHb, getEffectivePatientRecommendation } from './clinicalRules';
 
 export interface ExcelExportOptions {
@@ -297,6 +297,27 @@ export function exportDialysisToExcel(
       state: 'frozen',
     };
     XLSX.utils.book_append_sheet(wb, wsMat, 'MATRIK_CEK_HB');
+    sheetCount++;
+
+    // 5. Tambahkan Tab PASIEN_MENINGGAL
+    const decRows = buildDeceasedPatientsTable(patients);
+    const wsDec = XLSX.utils.aoa_to_sheet(decRows);
+    wsDec['!cols'] = [
+      { wch: 6 },  // No
+      { wch: 25 }, // Nama Pasien
+      { wch: 14 }, // No. RM
+      { wch: 15 }, // Status
+      { wch: 16 }, // Tanggal Wafat
+      { wch: 25 }, // Tempat/Keterangan
+      { wch: 16 }, // Jadwal
+      { wch: 12 }, // Shift
+      { wch: 15 }, // Frekuensi
+      { wch: 12 }, // Hb
+      { wch: 20 }, // DPJP
+      { wch: 30 }, // Catatan Medis
+      { wch: 15 }, // Waktu Catat
+    ];
+    XLSX.utils.book_append_sheet(wb, wsDec, 'PASIEN_MENINGGAL');
     sheetCount++;
   }
 

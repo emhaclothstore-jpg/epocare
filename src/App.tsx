@@ -890,7 +890,12 @@ export default function App() {
       });
 
       if (autoSyncEnabled && savedList.length > 0) {
-        triggerAutoSync(savedList, undefined, (patientData.scheduleDay || editingPatient.scheduleDay) as HDDaySchedule);
+        const isStatusChanged = patientData.patientStatus !== undefined && patientData.patientStatus !== editingPatient.patientStatus;
+        triggerAutoSync(
+          savedList, 
+          undefined, 
+          isStatusChanged ? undefined : ((patientData.scheduleDay || editingPatient.scheduleDay) as HDDaySchedule)
+        );
       }
     } else {
       // Create new

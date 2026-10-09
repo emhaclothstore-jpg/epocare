@@ -1310,13 +1310,22 @@ export function buildScheduleMatrixTable(
       : patient.hdFrequency === '1 kali dalam satu minggu'
       ? (patient.singleDay ? `1x / mgg (${patient.singleDay})` : '1x / mgg')
       : '2x / mgg';
+    const isMeninggal = patient.patientStatus === 'Meninggal Dunia';
+    const isOtherNonActive = patient.patientStatus && patient.patientStatus !== 'Aktif';
+
+    const recoDisplay = isMeninggal
+      ? 'Non-Aktif (Meninggal Dunia)'
+      : isOtherNonActive
+      ? `Non-Aktif (${patient.patientStatus})`
+      : reco.title;
+
     const row: string[] = [
       String(displayNo),
       patient.name,
       patient.noRm,
       freqDisplay,
       patient.scheduleShift.includes('Pagi') ? 'Pagi (P)' : 'Siang (S)',
-      reco.title,
+      recoDisplay,
     ];
 
     let patientEpoGiven = 0;
@@ -1347,10 +1356,12 @@ export function buildScheduleMatrixTable(
       }
     }
 
-    const targetEpo = reco.totalEpoVials;
+    const targetEpo = (isMeninggal || patient.patientStatus === 'Berhenti HD' || patient.patientStatus === 'Pindah RS')
+      ? 0
+      : reco.totalEpoVials;
     grandTargetEpo += targetEpo;
     grandRealisasiEpo += patientEpoGiven;
-    grandTotalPrc += reco.transfusionBags;
+    grandTotalPrc += (isMeninggal ? 0 : reco.transfusionBags);
 
     const statusText = patient.patientStatus && patient.patientStatus !== 'Aktif'
       ? patient.patientStatus
@@ -1371,7 +1382,7 @@ export function buildScheduleMatrixTable(
       String(targetEpo),
       String(patientEpoGiven),
       `${patientEpoGiven} : ${targetEpo}`,
-      String(reco.transfusionBags > 0 ? reco.transfusionBags : '-'),
+      String((isMeninggal || reco.transfusionBags <= 0) ? '-' : reco.transfusionBags),
       statusText,
       finalNotes
     );
@@ -1566,6 +1577,25 @@ export async function pushPatientsToSheet(
     console.warn('Gagal memperbarui MATRIK CEK HB via direct API:', err);
   }
 
+  // Buat atau Update Tab PASIEN MENINGGAL
+  try {
+    let decSheetName = 'PASIEN MENINGGAL';
+    if (existingSheets.includes('PASIEN MENINGGAL')) {
+      decSheetName = 'PASIEN MENINGGAL';
+    } else if (existingSheets.includes('PASIEN_MENINGGAL')) {
+      decSheetName = 'PASIEN_MENINGGAL';
+    } else if (existingSheets.includes('DATA PASIEN MENINGGAL')) {
+      decSheetName = 'DATA PASIEN MENINGGAL';
+    } else {
+      await addSheetTab(spreadsheetId, 'PASIEN MENINGGAL', accessToken);
+    }
+    const decTable = buildDeceasedPatientsTable(patients);
+    const decRange = `${decSheetName}!A1:${getColLetter(decTable[0]?.length || 13)}${Math.max(decTable.length + 5, 10)}`;
+    await updateSheetValues(spreadsheetId, decRange, decTable, accessToken);
+  } catch (err) {
+    console.warn('Gagal memperbarui PASIEN MENINGGAL via direct API:', err);
+  }
+
   // Terapkan styling visual & UKURAN KOLOM MINIMALIS
   try {
     await applyHeaderAndColumnStyling(spreadsheetId, accessToken);
@@ -1636,6 +1666,51 @@ export async function readPatientsFromSheet(
 
   const flatPatients = results.flat();
 
+  // Baca tab PASIEN MENINGGAL jika tersedia untuk mengembalikan status wafat
+  const deceasedMap = new Map<string, { statusDate?: string; statusNotes?: string; doctor?: string; notes?: string }>();
+  const isDeceasedTab = existingSheets.find((s) => {
+    const norm = s.toLowerCase().replace(/[\s_-]+/g, '');
+    return norm.includes('pasienmeninggal') || norm.includes('meninggal');
+  });
+
+  if (isDeceasedTab) {
+    try {
+      const dRange = `${isDeceasedTab}!A1:M100`;
+      const dRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(dRange)}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (dRes.ok) {
+        const dJson = await dRes.json();
+        const dRows: string[][] = dJson.values || [];
+        if (dRows.length > 1) {
+          dRows.slice(1).forEach((r) => {
+            const rName = (r[1] || '').trim();
+            const rRm = (r[2] || '').trim();
+            if (!rName || isSummaryOrHeaderRow(rName, rRm)) return;
+            const rDate = (r[4] || '').trim();
+            const rNotes = (r[5] || '').trim();
+            const rDoctor = (r[10] || '').trim();
+            const rClinNotes = (r[11] || '').trim();
+            const rKey = rRm.toLowerCase();
+            const normKey = rKey.replace(/[^a-z0-9]/g, '');
+            const normN = rName.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const info = {
+              statusDate: rDate !== '-' ? rDate : undefined,
+              statusNotes: rNotes !== '-' ? rNotes : undefined,
+              doctor: rDoctor !== '-' ? rDoctor : undefined,
+              notes: rClinNotes !== '-' ? rClinNotes : undefined,
+            };
+            if (rKey) deceasedMap.set(rKey, info);
+            if (normKey) deceasedMap.set(normKey, info);
+            if (normN) deceasedMap.set(normN, info);
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Gagal membaca tab PASIEN MENINGGAL via direct API:', e);
+    }
+  }
+
   // Lengkapi dengan acuan Hb dan nilai Hb bulan berjalan dari REKAP_HB_TAHUNAN
   return flatPatients.map((p) => {
     const rmKey = p.noRm.toLowerCase().trim();
@@ -1644,6 +1719,12 @@ export async function readPatientsFromSheet(
 
     const prevHb = yearlyMap.get(rmKey) ?? yearlyMap.get(normRmKey) ?? yearlyMap.get(normNameKey);
     const curHb = currentMap.get(rmKey) ?? currentMap.get(normRmKey) ?? currentMap.get(normNameKey);
+    const decInfo = deceasedMap.get(rmKey) ?? deceasedMap.get(normRmKey) ?? deceasedMap.get(normNameKey);
+
+    const isDeceased = Boolean(decInfo) || p.patientStatus === 'Meninggal Dunia';
+    const patientStatus: PatientRecord['patientStatus'] = isDeceased ? 'Meninggal Dunia' : p.patientStatus;
+    const statusDate = decInfo?.statusDate || p.statusDate;
+    const statusNotes = decInfo?.statusNotes || p.statusNotes;
 
     // Jika tidak ada data Hb pada Google Sheet untuk bulan ini, maka nilainya 0
     const effectiveHb = (typeof curHb === 'number' && curHb > 0) ? curHb : 0;
@@ -1654,12 +1735,18 @@ export async function readPatientsFromSheet(
 
     return {
       ...p,
+      patientStatus,
+      statusDate,
+      statusNotes,
+      overallStatus: isDeceased ? 'Selesai' : p.overallStatus,
       hbValue: effectiveHb,
       recommendation: reco,
       prevHbValue: prevHb,
       isSelectiveHb: isSelective,
       monthPeriod: currentMonth,
       hbDate: `${currentMonth}-02`,
+      doctorInCharge: decInfo?.doctor || p.doctorInCharge,
+      clinicalNotes: decInfo?.notes || p.clinicalNotes,
       labSchedule: {
         scheduledDate: p.labSchedule?.scheduledDate || getFirstHDDateOfMonth(currentMonth, p.scheduleDay, p.singleDay, p.hdFrequency, p.lastHdDate).dateString,
         testType: isSelective ? 'Cek Hb Pilihan (Hb ≤ 8.9)' : 'Rutin Hb (Evaluasi EPO)',
@@ -2190,9 +2277,15 @@ export function buildYearlySummaryTable(
     // Evaluasi klinis untuk rencana cek Hb bulan berikutnya:
     // Acuan utama: jika nilai Hb terakhir <= 8.9 mg/dL -> Cek Hb Pilihan (≤ 8.9)
     const effectiveHbForNext = curVal > 0 ? curVal : prevVal;
-    let rencanaCek = 'Rutin Hb (Evaluasi EPO)';
+    const isMeninggal = p.patientStatus === 'Meninggal Dunia';
+    const isOtherNonActive = p.patientStatus && p.patientStatus !== 'Aktif';
 
-    if (effectiveHbForNext !== undefined && effectiveHbForNext > 0) {
+    let rencanaCek = 'Rutin Hb (Evaluasi EPO)';
+    if (isMeninggal) {
+      rencanaCek = '⬛ Meninggal Dunia';
+    } else if (isOtherNonActive) {
+      rencanaCek = `Non-Aktif (${p.patientStatus})`;
+    } else if (effectiveHbForNext !== undefined && effectiveHbForNext > 0) {
       const roundedVal = Number(effectiveHbForNext.toFixed(1));
       if (roundedVal <= 8.9) {
         rencanaCek = '⭐ Cek Hb Pilihan (≤ 8.9)';
@@ -2207,8 +2300,29 @@ export function buildYearlySummaryTable(
       rencanaCek = 'Menunggu Input Lab';
     }
 
+    const recoTitle = isMeninggal
+      ? 'Non-Aktif (Meninggal Dunia)'
+      : isOtherNonActive
+      ? `Non-Aktif (${p.patientStatus})`
+      : (p.recommendation?.title || '-');
+
+    let finalNotes = p.clinicalNotes || '';
+    if (isMeninggal) {
+      const dateText = p.statusDate ? ` per ${p.statusDate}` : '';
+      const notesText = p.statusNotes ? ` (${p.statusNotes})` : '';
+      if (!finalNotes.includes('Meninggal Dunia')) {
+        finalNotes = finalNotes ? `[Meninggal Dunia${dateText}${notesText}] ${finalNotes}` : `[Meninggal Dunia${dateText}${notesText}]`;
+      }
+    } else if (isOtherNonActive) {
+      const dateText = p.statusDate ? ` per ${p.statusDate}` : '';
+      const notesText = p.statusNotes ? ` (${p.statusNotes})` : '';
+      if (!finalNotes.includes(p.patientStatus!)) {
+        finalNotes = finalNotes ? `[${p.patientStatus}${dateText}${notesText}] ${finalNotes}` : `[${p.patientStatus}${dateText}${notesText}]`;
+      }
+    }
+
     const prevHbDisplay = prevVal !== undefined && prevVal > 0 ? prevVal.toFixed(1) : '-';
-    const curHbDisplay = curVal > 0 ? curVal.toFixed(1) : '0';
+    const curHbDisplay = isMeninggal ? '-' : (curVal > 0 ? curVal.toFixed(1) : '0');
 
     const row: string[] = [
       String(idx + 1),
@@ -2224,7 +2338,7 @@ export function buildYearlySummaryTable(
       prevHbDisplay,
       curHbDisplay,
       rencanaCek,
-      p.recommendation.title,
+      recoTitle,
     ];
 
     // Kolom 12 Bulan (Jan s/d Des)
@@ -2239,9 +2353,70 @@ export function buildYearlySummaryTable(
     }
 
     row.push(p.doctorInCharge || 'dr. Sp.PD-KGH');
-    row.push(p.clinicalNotes || '');
+    row.push(finalNotes);
 
     rows.push(row);
+  });
+
+  return rows;
+}
+
+/**
+ * Membangun tabel khusus PASIEN MENINGGAL untuk Google Sheets
+ * Tab 'PASIEN MENINGGAL' mencatat seluruh riwayat pasien wafat secara permanen dan jelas
+ */
+export function buildDeceasedPatientsTable(patients: PatientRecord[]): string[][] {
+  const header: string[] = [
+    'No',
+    'Nama Pasien',
+    'No. RM',
+    'Status',
+    'Tanggal Wafat / Meninggal',
+    'Tempat / Keterangan Wafat',
+    'Jadwal HD Terakhir',
+    'Shift Terakhir',
+    'Frekuensi HD',
+    'Hb Terakhir (g/dL)',
+    'Dokter DPJP',
+    'Catatan Klinis / Riwayat Medis',
+    'Waktu Pencatatan Sistem'
+  ];
+
+  const rows: string[][] = [header];
+
+  const deceasedPatients = patients.filter((p) => p.patientStatus === 'Meninggal Dunia');
+
+  if (deceasedPatients.length === 0) {
+    rows.push(['-', '(Belum ada data pasien meninggal dunia)', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-', '-']);
+    return rows;
+  }
+
+  deceasedPatients.forEach((p, idx) => {
+    const hbDisplay = p.hbValue > 0 
+      ? p.hbValue.toFixed(1) 
+      : (p.prevHbValue && p.prevHbValue > 0 ? p.prevHbValue.toFixed(1) : '-');
+
+    const freqDisplay = p.hdFrequency === '1 kali / 2 minggu'
+      ? (p.singleDay ? `1x/2 mgg (${p.singleDay})` : '1x/2 mgg')
+      : p.hdFrequency === '1 kali dalam satu minggu'
+      ? (p.singleDay ? `1x/mgg (${p.singleDay})` : '1x/mgg')
+      : '2x/mgg';
+
+    rows.push([
+      String(idx + 1),
+      p.name,
+      p.noRm,
+      'Meninggal Dunia',
+      p.statusDate || '-',
+      p.statusNotes || '-',
+      p.scheduleDay || '-',
+      p.scheduleShift ? (p.scheduleShift.includes('Pagi') ? 'Pagi (P)' : 'Siang (S)') : '-',
+      freqDisplay,
+      hbDisplay,
+      p.doctorInCharge || 'dr. Sp.PD-KGH',
+      p.clinicalNotes || '-',
+      p.updatedAt ? new Date(p.updatedAt).toLocaleDateString('id-ID') : '-'
+    ]);
   });
 
   return rows;
@@ -2851,8 +3026,8 @@ export const APPS_SCRIPT_SAMPLE_CODE = `/**
  */
 function doGet(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  // Pertahankan 5 sheet resmi: REKAP HB TAHUNAN, MATRIK CEK HB, Senin-Kamis, Selasa-Jumat, Rabu-Sabtu (Tanpa JADWAL CEK HB)
-  var sheetNames = ["REKAP HB TAHUNAN", "REKAP_HB_TAHUNAN", "MATRIK CEK HB", "MATRIKS_CEK_HB", "Matrik_Cek_HB", "Senin-Kamis", "Selasa-Jumat", "Rabu-Sabtu"];
+  // Pertahankan sheet resmi: REKAP HB TAHUNAN, MATRIK CEK HB, Senin-Kamis, Selasa-Jumat, Rabu-Sabtu, PASIEN MENINGGAL
+  var sheetNames = ["REKAP HB TAHUNAN", "REKAP_HB_TAHUNAN", "MATRIK CEK HB", "MATRIKS_CEK_HB", "Matrik_Cek_HB", "Senin-Kamis", "Selasa-Jumat", "Rabu-Sabtu", "PASIEN MENINGGAL", "PASIEN_MENINGGAL", "DATA PASIEN MENINGGAL"];
   var result = {};
   
   // Baca langsung hanya tab yang dibutuhkan tanpa looping seluruh tab workbook
@@ -3128,12 +3303,18 @@ function doPost(e) {
         } else {
           var rowData = finalYearlyRows[yr];
           var rencanaStr = (rowData[8] || "").toString();
+          var notesStr = (rowData[23] || "").toString();
+          var isRowMeninggal = rencanaStr.indexOf("Meninggal") !== -1 || notesStr.indexOf("Meninggal") !== -1;
 
           for (var yc = 0; yc < yCols; yc++) {
             var cellVal = rowData[yc];
             var numVal = parseFloat(String(cellVal).replace(",", "."));
 
-            if (yc === 8 && rencanaStr.indexOf("Cek Hb Pilihan") !== -1) {
+            if (isRowMeninggal) {
+              rB.push("#f1f5f9");
+              rF.push(yc === 8 || yc === 9 ? "bold" : "normal");
+              rC.push("#475569");
+            } else if (yc === 8 && rencanaStr.indexOf("Cek Hb Pilihan") !== -1) {
               rB.push("#fce8e6");
               rF.push("bold");
               rC.push("#c5221f");
@@ -3251,6 +3432,76 @@ function doPost(e) {
       mRange.setFontColors(mFcs);
     }
 
+    // 4. SINKRONISASI TAB PASIEN MENINGGAL (Rekap Pasien Wafat & Riwayat Medis)
+    if (body.deceasedData && body.deceasedData.length > 0) {
+      var decSheet = ss.getSheetByName("PASIEN MENINGGAL") || ss.getSheetByName("PASIEN_MENINGGAL") || ss.getSheetByName("DATA PASIEN MENINGGAL");
+      var isNewDecSheet = false;
+      if (!decSheet) {
+        decSheet = ss.insertSheet("PASIEN MENINGGAL");
+        isNewDecSheet = true;
+      }
+      var dRows = body.deceasedData;
+      var numDRows = dRows.length;
+      var numDCols = dRows[0].length;
+
+      if (isNewDecSheet || decSheet.getLastRow() === 0) {
+        decSheet.clearContents();
+        decSheet.clearFormats();
+        decSheet.getRange(1, 1, numDRows, numDCols).setNumberFormat("@");
+        decSheet.setFrozenRows(1);
+        decSheet.setFrozenColumns(3);
+
+        decSheet.setColumnWidth(1, 40);   // No
+        decSheet.setColumnWidth(2, 200);  // Nama Pasien
+        decSheet.setColumnWidth(3, 95);   // No. RM
+        decSheet.setColumnWidth(4, 110);  // Status
+        decSheet.setColumnWidth(5, 120);  // Tanggal Wafat
+        decSheet.setColumnWidth(6, 200);  // Tempat / Keterangan Wafat
+        decSheet.setColumnWidth(7, 110);  // Jadwal Terakhir
+        decSheet.setColumnWidth(8, 85);   // Shift Terakhir
+        decSheet.setColumnWidth(9, 110);  // Frekuensi
+        decSheet.setColumnWidth(10, 95);  // Hb Terakhir
+        decSheet.setColumnWidth(11, 130); // DPJP
+        decSheet.setColumnWidth(12, 220); // Catatan Medis
+        decSheet.setColumnWidth(13, 110); // Waktu Pencatatan
+      } else {
+        if (decSheet.getLastRow() > numDRows) {
+          decSheet.getRange(numDRows + 1, 1, decSheet.getLastRow() - numDRows, decSheet.getLastColumn()).clearContent();
+        }
+      }
+
+      var dRange = decSheet.getRange(1, 1, numDRows, numDCols);
+      dRange.setValues(dRows);
+
+      var dBgs = [];
+      var dFws = [];
+      var dFcs = [];
+      for (var dr = 0; dr < numDRows; dr++) {
+        var rB = [];
+        var rF = [];
+        var rC = [];
+        if (dr === 0) {
+          for (var dc = 0; dc < numDCols; dc++) {
+            rB.push("#334155"); // Slate-700
+            rF.push("bold");
+            rC.push("#ffffff");
+          }
+        } else {
+          for (var dc = 0; dc < numDCols; dc++) {
+            rB.push(dr % 2 === 0 ? "#f8fafc" : "#ffffff");
+            rF.push(dc === 3 ? "bold" : "normal");
+            rC.push(dc === 3 ? "#0f172a" : "#334155");
+          }
+        }
+        dBgs.push(rB);
+        dFws.push(rF);
+        dFcs.push(rC);
+      }
+      dRange.setBackgrounds(dBgs);
+      dRange.setFontWeights(dFws);
+      dRange.setFontColors(dFcs);
+    }
+
     return ContentService.createTextOutput(JSON.stringify({ 
       status: "success", 
       message: "Sukses mensinkronisasikan jadwal & rekap data super cepat!" 
@@ -3357,6 +3608,7 @@ export async function pullViaAppsScript(
 
   let yearlyRows: string[][] = [];
   let tabData: Record<string, string[][]> = {};
+  let deceasedRows: string[][] = [];
 
   const scheduleNames = ['Senin-Kamis', 'Selasa-Jumat', 'Rabu-Sabtu'];
 
@@ -3367,7 +3619,7 @@ export async function pullViaAppsScript(
     const timeoutId = setTimeout(() => controller.abort(), 35000);
 
     try {
-      // Ambil tab rekap tahunan dan 3 tab jadwal harian secara paralel
+      // Ambil tab rekap tahunan, 3 tab jadwal harian, dan tab pasien meninggal secara paralel
       const fetchPromises: Promise<any>[] = [
         fetch(`${cleanUrl}${separator}sheet=REKAP_HB_TAHUNAN&_t=${now}`, {
           method: 'GET',
@@ -3381,9 +3633,24 @@ export async function pullViaAppsScript(
             signal: controller.signal,
           }).then(r => (r.ok ? r.json() : null)).catch(() => null)
         ),
+        fetch(`${cleanUrl}${separator}sheet=${encodeURIComponent('PASIEN MENINGGAL')}&_t=${now}`, {
+          method: 'GET',
+          redirect: 'follow',
+          signal: controller.signal,
+        }).then(r => (r.ok ? r.json() : null)).catch(() => null),
       ];
 
-      const [yearlyResp, ...schedResponses] = await Promise.all(fetchPromises);
+      const [yearlyResp, ...restResponses] = await Promise.all(fetchPromises);
+      const schedResponses = restResponses.slice(0, scheduleNames.length);
+      const deceasedResp = restResponses[scheduleNames.length];
+
+      if (deceasedResp) {
+        if (Array.isArray(deceasedResp.data) && deceasedResp.data.length > 1) {
+          deceasedRows = deceasedResp.data;
+        } else if (Array.isArray(deceasedResp) && deceasedResp.length > 1) {
+          deceasedRows = deceasedResp;
+        }
+      }
 
       // Tangani respon REKAP_HB_TAHUNAN
       if (yearlyResp) {
@@ -3399,6 +3666,15 @@ export async function pullViaAppsScript(
             if (norm.includes('rekaphb') && Array.isArray(allTabs[k])) {
               yearlyRows = allTabs[k];
               break;
+            }
+          }
+          if (deceasedRows.length <= 1) {
+            for (const k of Object.keys(allTabs)) {
+              const norm = k.toLowerCase().replace(/[\s_-]+/g, '');
+              if ((norm.includes('pasienmeninggal') || norm.includes('meninggal')) && Array.isArray(allTabs[k])) {
+                deceasedRows = allTabs[k];
+                break;
+              }
             }
           }
           scheduleNames.forEach((sName) => {
@@ -3492,6 +3768,21 @@ export async function pullViaAppsScript(
       }
     } catch (e) {
       console.warn('Gagal mengambil REKAP_HB_TAHUNAN via gviz:', e);
+    }
+  }
+
+  // 4. Jika Apps Script gagal dan deceasedRows masih kosong, ambil PASIEN MENINGGAL via gviz CSV
+  if (deceasedRows.length <= 1 && effectiveSheetId) {
+    try {
+      const gvizDec = await fetchSheetCsvFromGviz(effectiveSheetId, 'PASIEN MENINGGAL');
+      if (gvizDec.length > 1) {
+        deceasedRows = gvizDec;
+      } else {
+        const altDec = await fetchSheetCsvFromGviz(effectiveSheetId, 'PASIEN_MENINGGAL');
+        if (altDec.length > 1) deceasedRows = altDec;
+      }
+    } catch (e) {
+      // ignore
     }
   }
 
@@ -3776,6 +4067,77 @@ export async function pullViaAppsScript(
     });
   }
 
+  // 6. Proses Tab PASIEN MENINGGAL untuk memastikan status wafat tercatat sempurna
+  if (deceasedRows.length > 1) {
+    deceasedRows.slice(1).forEach((dRow, i) => {
+      const name = (dRow[1] || '').trim();
+      const noRm = (dRow[2] || '').trim();
+      if (!name || isSummaryOrHeaderRow(name, noRm)) return;
+
+      const normRmKey = noRm.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+      const normNameKey = name.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+      const lookupKey = normRmKey || normNameKey;
+
+      const statusDate = (dRow[4] || '').trim();
+      const statusNotes = (dRow[5] || '').trim();
+      const schedRaw = (dRow[6] || '').trim();
+      const shiftRaw = (dRow[7] || '').trim();
+      const freqRaw = (dRow[8] || '').trim();
+      const hbRaw = decodeHbFromValue(dRow[9]) || 0;
+      const dpjp = (dRow[10] || '').trim();
+      const medNotes = (dRow[11] || '').trim();
+
+      if (patientMap.has(lookupKey)) {
+        const existing = patientMap.get(lookupKey)!;
+        existing.patientStatus = 'Meninggal Dunia';
+        existing.overallStatus = 'Selesai';
+        if (statusDate && statusDate !== '-') existing.statusDate = statusDate;
+        if (statusNotes && statusNotes !== '-') existing.statusNotes = statusNotes;
+        if (dpjp && dpjp !== '-' && (!existing.doctorInCharge || existing.doctorInCharge === 'dr. Sp.PD-KGH')) {
+          existing.doctorInCharge = dpjp;
+        }
+        if (medNotes && medNotes !== '-' && !existing.clinicalNotes) {
+          existing.clinicalNotes = medNotes;
+        }
+        return;
+      }
+
+      let scheduleDay: HDDaySchedule = 'Senin - Kamis';
+      if (schedRaw.includes('Selasa') || schedRaw.includes('Jumat')) scheduleDay = 'Selasa - Jumat';
+      else if (schedRaw.includes('Rabu') || schedRaw.includes('Sabtu')) scheduleDay = 'Rabu - Sabtu';
+
+      const scheduleShift: HDShift = shiftRaw.toLowerCase().includes('siang') ? 'Shift 2 (Siang)' : 'Shift 1 (Pagi)';
+
+      let hdFrequency: HDFrequency = '2 kali dalam satu minggu';
+      if (freqRaw.includes('1/2') || freqRaw.includes('2 mgg')) hdFrequency = '1 kali / 2 minggu';
+      else if (freqRaw.includes('1')) hdFrequency = '1 kali dalam satu minggu';
+
+      const cleanNoRm = noRm ? noRm.replace(/[^a-zA-Z0-9_-]/g, '') : `RM${2000 + i}`;
+
+      patientMap.set(lookupKey, {
+        id: `pat-${cleanNoRm.toLowerCase()}`,
+        noRm: noRm || `RM-${2000 + i}`,
+        name,
+        patientStatus: 'Meninggal Dunia',
+        statusDate: statusDate && statusDate !== '-' ? statusDate : undefined,
+        statusNotes: statusNotes && statusNotes !== '-' ? statusNotes : undefined,
+        hdFrequency,
+        scheduleDay,
+        scheduleShift,
+        hbValue: hbRaw,
+        hbDate: `${currentMonth}-02`,
+        monthPeriod: currentMonth,
+        recommendation: calculateClinicalRecommendation(0, hdFrequency),
+        weeks: generateDefaultWeeks('MENUNGGU_HASIL_LAB', currentMonth, hdFrequency, scheduleDay),
+        dailyRecords: {},
+        overallStatus: 'Selesai',
+        clinicalNotes: medNotes && medNotes !== '-' ? medNotes : '',
+        doctorInCharge: dpjp && dpjp !== '-' ? dpjp : 'dr. Sp.PD-KGH',
+        updatedAt: new Date().toISOString(),
+      });
+    });
+  }
+
   const allPatients = Array.from(patientMap.values());
 
   if (allPatients.length > 0) {
@@ -3829,6 +4191,9 @@ export async function pushViaAppsScript(
   // Matriks kalender 6 hari sesi HD pertama (MATRIK CEK HB) - Tanpa lembar JADWAL CEK HB
   const labMatrixData = targetSchedule ? undefined : buildNextMonthCalendarMatrix(patients, yearMonth, effectiveScope);
 
+  // Tabel Rekap Khusus Pasien Meninggal Dunia
+  const deceasedData = buildDeceasedPatientsTable(patients);
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 60000);
 
@@ -3846,6 +4211,7 @@ export async function pushViaAppsScript(
         scheduleData,
         yearlyData,
         labMatrixData,
+        deceasedData,
       }),
     });
   } catch (err: any) {
